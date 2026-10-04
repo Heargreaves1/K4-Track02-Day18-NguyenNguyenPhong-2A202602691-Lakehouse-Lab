@@ -374,6 +374,36 @@ and the lifecycle is enforced by the table itself.
 """)
 
 # %% [markdown]
+# ### Giải thích kết quả NB7
+#
+# * **Inline vs pointer — dung lượng gần như nhau** (12.5 MB inline so với 4.7 KB bảng + 12.5 MB
+#   object): bytes phải nằm ở đâu đó; khác biệt là reader bị buộc phải chạm vào cái gì.
+# * **Analytical scan không sợ blob:** `SELECT topic, count(*)` chỉ đọc cột `doc_id` + `topic` =
+#   **1.2 KB trên 12.5 MB** — số lấy thẳng từ footer Parquet. Columnar + projection pushdown nghĩa là
+#   cột `blob` không được đọc.
+# * **Random access mới là chỗ vỡ — amplification 200×** (ngưỡng ≥ 5×): file inline chỉ có **1 row
+#   group chứa cả 200 dòng (12.5 MB)**. Đơn vị I/O + giải nén của Parquet là row group, nên lấy 1 frame
+#   64 KB phải đọc 12.5 MB; pointer chỉ cần 1 `GET` 64 KB. 200× = số dòng trong row group vì mọi blob
+#   cùng cỡ. Ở 1 000 frame/s để nuôi GPU, đó là 12.5 GB/s thay vì 64 MB/s → GPU đói dữ liệu.
+#   Row group nhỏ hơn giảm amplification nhưng làm footer/metadata phình ra; Lance giải bằng cách cho
+#   phép đọc ~1 dòng.
+# * **int8 nhỏ hơn 5.8× trên đĩa** (ngưỡng ≥ 3×): lý thuyết là 4× (1 024 B → 256 B/dòng). Thực tế
+#   cao hơn vì float32 gần như không nén được — 2.6 MB trên đĩa so với 2.0 MB trong RAM (mantissa
+#   ngẫu nhiên + overhead mã hóa `list<float>`), còn int8 nén được chút ít (451.9 KB so với 500 KB raw).
+#   **recall@10 = 0.904** (≥ 0.80) và **topic fidelity = 1.000** (≥ 0.95): ~10 % ID bị đổi chỗ với
+#   hàng xóm gần tương đương, nhưng 100 % kết quả vẫn đúng chủ đề — với RAG, fidelity mới là thước đo
+#   quan trọng; exact-ID recall đánh giá thấp chất lượng lượng tử hóa.
+# * **Semantic search là SQL:** query doc 7 (`storage`) → top-5 đều `storage` (sim 1.000 rồi
+#   0.779…0.768). Phải cast `emb::FLOAT[256]` vì Delta đọc lại vector thành `list<float>` biến chiều.
+#   Lọc theo `consent_train` + `license` nằm cùng một câu SQL vì vector và cột governance ở chung dòng.
+#   Brute force tăng tuyến tính (~1.6 s ở 100K vector) → phù hợp phân tích/đo recall offline, không phải
+#   serving online.
+# * **Lifecycle bug tái hiện:** `user_042` xin xóa 8 doc. Lakehouse: **0 hit**; index ngoài sync một
+#   lần: **8 hit** → vẫn có thể đưa dữ liệu đã xóa vào prompt RAG. Change Data Feed phát đúng **8 sự
+#   kiện `delete`** mang `doc_id` cần evict; index dẫn xuất phải subscribe các sự kiện này thay vì
+#   chỉ upsert một chiều. Tốt nhất là giữ vector trong bảng để lifecycle do chính bảng quản lý.
+
+# %% [markdown]
 # ## ✅ NB7 pass criteria
 #
 # | Check | Target |

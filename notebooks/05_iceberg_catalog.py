@@ -278,6 +278,28 @@ print(f"Total rows readable across BOTH specs: {tbl.scan().to_arrow().num_rows:,
 print("\nTwo layouts, one table, zero rewrites. This is the feature.")
 
 # %% [markdown]
+# ### Giải thích kết quả NB5
+#
+# * **Bảng tạo qua catalog:** `cat.create_table("lake.llm_events")` — mình không chọn đường dẫn;
+#   SqlCatalog quyết định `location` và giữ con trỏ tới `metadata.json` hiện hành. Partition spec
+#   là `ts_day: day(ts)` (field 1000, nguồn là field 2 = `ts`).
+# * **Hidden partitioning, pruning 10×** (ngưỡng ≥ 5×): filter viết trên cột thật `ts`
+#   (`ts >= '2026-08-05' and ts < '2026-08-06'`), **không** nhắc tới `ts_day`. `plan_files()` tự
+#   suy ra partition từ transform `day(ts)` lưu trong metadata và chỉ chọn 1/10 file, trả đúng
+#   500 dòng của ngày đó. Một người dùng Hive quên `WHERE dt=...` sẽ đọc cả 10 file — với file
+#   512 MB và $5/TB, đó là ~4.5 GB lãng phí/truy vấn, **≈ $220/ngày** ở 10K truy vấn.
+# * **Cây metadata 3 tầng:** metadata.json → 10 manifest list (1/snapshot) → 10 manifest → 10 data
+#   file. Metadata/ chiếm **~137 KB so với 47.3 KB data (~290 %)** vì mỗi file chỉ 500 dòng: mỗi
+#   commit nhỏ vẫn sinh đủ 1 manifest list + 1 manifest + 1 metadata.json. Ở file 512 MB tỉ lệ này
+#   ~0.1 %; small files phạt hai lần — nhiều data file *và* nhiều metadata phải plan.
+# * **Field ID bền qua rename:** `latency_ms` → `latency_millis` giữ **field_id = 4**; cột mới `tier`
+#   nhận id 6. Rename chỉ sửa metadata, không ghi lại file Parquet nào; dữ liệu cũ vẫn map đúng cột vì
+#   Iceberg match theo ID chứ không theo tên/vị trí. 5 000 dòng cũ đọc ra `tier = NULL`.
+# * **Partition evolution:** thêm `identity(model)` tạo spec mới; data file cũ giữ `spec_id=1`, batch
+#   ngày 11 ghi bằng `spec_id=2`. Hai layout cùng tồn tại và scan đọc đủ **5 500** dòng (11 × 500)
+#   mà không rewrite gì. (`spec_id=0` là spec rỗng lúc tạo bảng, không có file nào dùng.)
+
+# %% [markdown]
 # ## ✅ NB5 pass criteria
 #
 # | Check | Target |

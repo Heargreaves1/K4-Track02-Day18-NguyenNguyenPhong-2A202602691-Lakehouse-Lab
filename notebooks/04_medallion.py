@@ -150,6 +150,64 @@ assert n_dates >= 7, (
 )
 
 # %% [markdown]
+# ## Gold quality checks (not asserted by the original notebook)
+#
+# The rubric asks for *correct* Gold: p50 ≤ p95, positive cost, error_rate in
+# [0, 1], every date covered by all 3 models — plus all three layers on disk.
+
+# %%
+for layer, p in [("bronze", BRONZE), ("silver", SILVER), ("gold", GOLD)]:
+    _dt = DeltaTable(p)
+    print(f"{layer:<7} v{_dt.version()}  files={len(_dt.file_uris()):>3}  rows={_dt.count():>7,}  "
+          f"_delta_log={Path(p, '_delta_log').exists()}  {p}")
+
+gold_sorted = gold_df.sort(["date", "model"]).with_columns(
+    pl.col("error_rate").round(4), pl.col("cost_usd").round(2))
+with pl.Config(tbl_rows=-1, tbl_width_chars=200, fmt_str_lengths=20):
+    print(gold_sorted.select("date", "model", "p50_latency_ms", "p95_latency_ms",
+                             "error_rate", "cost_usd"))
+
+per_date = gold_df.group_by("date").agg(pl.col("model").n_unique().alias("n_models"))
+gold_checks = {
+    "silver < bronze (dedup)":       silver_n < bronze_n,
+    "≥ 7 dates":                     n_dates >= 7,
+    "3 models":                      n_models == 3,
+    "every date has all 3 models":   per_date["n_models"].min() == 3,
+    "p50 ≤ p95 on every row":        bool((gold_df["p50_latency_ms"] <= gold_df["p95_latency_ms"]).all()),
+    "cost_usd > 0 on every row":     bool((gold_df["cost_usd"] > 0).all()),
+    "error_rate in [0, 1]":          bool(gold_df["error_rate"].is_between(0, 1).all()),
+}
+for k, v in gold_checks.items():
+    print(f"  [{'PASS' if v else 'FAIL'}] {k}")
+assert all(gold_checks.values()), "Gold quality check failed — see FAIL rows above"
+
+# Why 8 dates from a 7-day generator? CAST(ts AS DATE) on a TIMESTAMPTZ uses the
+# DuckDB session time zone, not UTC.
+session_tz = con.sql("SELECT current_setting('TimeZone')").fetchone()[0]
+print(f"\nDuckDB session TimeZone: {session_tz}")
+print("Silver rows per date:", con.sql("SELECT date, count(*) FROM silver GROUP BY 1 ORDER BY 1").fetchall())
+
+# %% [markdown]
+# ### Giải thích kết quả NB4
+#
+# * **Bronze → Silver:** Bronze có 200 000 dòng thô, trong đó generator cố ý chèn 9 948 lần retry
+#   trùng `request_id`. Silver dùng `ROW_NUMBER() OVER (PARTITION BY request_id ORDER BY ts)` và giữ
+#   `rn = 1` → còn **190 052** dòng, tức đúng bằng số `request_id` duy nhất. Nếu không dedup, mọi
+#   retry sẽ bị tính hai lần vào token và chi phí ở Gold.
+# * **Gold** tổng hợp theo `(date, model)`: **8 ngày × 3 model = 24 dòng** (đạt ≥ 7 × 3). Mọi kiểm tra
+#   chất lượng PASS: p50 ≤ p95, `cost_usd > 0`, `error_rate ∈ [0, 1]`, ngày nào cũng đủ 3 model.
+# * **Đọc số:** latency tăng theo cỡ model (p50 ≈ 0.56 s haiku, ≈ 1.4 s sonnet, ≈ 3.0 s opus; p95 ≈ 2× p50).
+#   `error_rate` ≈ 0.05 khớp với tỉ lệ status khác `ok` mà generator gieo (3 % `rate_limited` + 2 % `error`).
+#   Chi phí theo giá minh họa: sonnet chiếm 60 % traffic nên tổng chi phí/ngày cao nhất, còn opus chỉ
+#   10 % request nhưng chi phí gần bằng sonnet vì đơn giá token cao gấp 5×.
+# * **Vì sao 8 ngày chứ không phải 7:** dữ liệu trải đúng 7 ngày UTC (01–07/04), nhưng
+#   `CAST(ts AS DATE)` trên `TIMESTAMPTZ` dùng múi giờ phiên DuckDB (máy chạy ở UTC+7). Vì vậy 7 giờ
+#   cuối ngày 07/04 UTC rơi sang ngày 08/04 giờ địa phương, và ngày 01/04 chỉ có 17 giờ. Hai ngày
+#   đầu/cuối là ngày "thiếu" — dashboard so sánh theo ngày sẽ hiểu sai nếu không chuẩn hóa về UTC
+#   (ví dụ `CAST(ts AT TIME ZONE 'UTC' AS DATE)`). Đây là bẫy production thật: cùng pipeline chạy ở
+#   máy khác múi giờ sẽ cho Gold khác nhau.
+
+# %% [markdown]
 # ## ✅ Deliverable check
 # - [ ] All three tables exist under `_lakehouse/{bronze,silver,gold}/`
 # - [ ] Silver has fewer rows than Bronze (dedup worked)

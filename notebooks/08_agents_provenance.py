@@ -450,6 +450,30 @@ physical files. Retention and VACUUM must be considered separately (NB6),
 as must any copies or derived artifacts outside this table.""")
 
 # %% [markdown]
+# ### Giải thích kết quả NB8
+#
+# * **Trajectory medallion:** Bronze 1 578 step / 300 session → Silver partition theo `agent_version`
+#   (2 thư mục `policy-v2`, `policy-v3`) → Gold 2 dòng, mỗi policy 150 trajectory (success 0.760 vs
+#   0.753, ~5.26 step, ~$10.4 tổng chi phí). Partition theo version cho phép drop hoặc retrain trên
+#   rollouts của một policy mà không động tới policy kia, vì phân phối dữ liệu đổi theo policy.
+# * **Pin version:** training run ghi `table_version = 0` và `n_steps_seen = 1 578`. Sau khi 400 step
+#   mới được append (v1, 1 978 step), đọc lại `version=0` vẫn ra đúng **1 578** → khớp. Giới hạn: replay
+#   chỉ so **số dòng**, chưa so nội dung (checksum/hash) — đủ để minh họa, chưa đủ để chứng minh tái lập.
+# * **Lớp MCP mô phỏng (offline):** 5 lượt `list_tables` chỉ **1 lần đọc catalog** (4 lượt sau
+#   `cached=True` nhờ TTL 60 s). Đây là cache ở `list_tables`, không phải `tools/list`. `delete_rows`
+#   chưa xác nhận trả `input_required`; có `confirmed=True` thì `ok` — nhưng cờ này do bên gọi tự truyền
+#   nên **không phải** ranh giới phân quyền (agent có thể tự xác nhận). `submit_scan` trả task handle,
+#   poll 2 lần `working` rồi `completed` với 300 dòng; meter ghi nhận số call/ms theo từng tool.
+# * **Provenance:** 4 bucket minh họa đều thành partition (`licensed` 675, `public_domain` 333,
+#   `synthetic` 331, `scraped_optout_checked` 327) + **334 dòng `UNCLASSIFIED`** (license `unknown`) bị
+#   loại khỏi tập trainable → **1 666 / 2 000** dòng. Model card ghi `corpus_version` để trả lời "model
+#   này train trên version nào". Mapping chỉ là luật của lab: CC-BY-4.0 bị gán `public_domain` dù thực
+#   chất là giấy phép yêu cầu ghi công, và `user-owned + consent` chưa chứng minh đã kiểm tra opt-out.
+# * **Xóa subject:** `user_007` có 8 dòng (5 trong số đó thuộc `UNCLASSIFIED`) → 0 ở version hiện tại
+#   (v1). Nhưng v0 vẫn chứa 8 dòng đó qua time travel cho tới khi VACUUM xóa file cũ — và các bản sao
+#   ngoài bảng (index, backup, model đã train) không được xử lý bởi lệnh delete này.
+
+# %% [markdown]
 # ## ✅ NB8 pass criteria
 #
 # | Check | Target |

@@ -81,8 +81,12 @@ for h in DeltaTable(table_path).history():
 # %%
 v0_count = DeltaTable(table_path, version=0).to_pyarrow_table().num_rows
 v1_cols  = DeltaTable(table_path, version=1).schema().to_arrow().names
+v2_count = DeltaTable(table_path, version=2).to_pyarrow_table().num_rows
+v3_bad   = DeltaTable(table_path, version=3).to_pyarrow_table(filters=[("score", "<", 0)]).num_rows
 print(f"v0 row count: {v0_count}")
 print(f"v1 schema:    {v1_cols}")
+print(f"v2 row count (after MERGE): {v2_count}")
+print(f"v3 rows with score<0 (the bad append): {v3_bad}")
 
 # %% [markdown]
 # ## 4. RESTORE bad version (rollback)
@@ -113,6 +117,27 @@ final_history = DeltaTable(table_path).history()
 for h in final_history:
     print(f"  v{h['version']:>2}  {h['operation']:<25}")
 print(f"\nTotal versions: {len(final_history)}  (target ≥ 5)")
+
+# The bad rows are gone from the current version but still reachable by time travel.
+still_v3 = DeltaTable(table_path, version=3).to_pyarrow_table(filters=[("score", "<", 0)]).num_rows
+print(f"score<0 rows: current={bad_count}, still visible at v3={still_v3}")
+
+# %% [markdown]
+# ### Giải thích kết quả NB3
+#
+# * **MERGE 100K dòng thành công:** metrics của v2 ghi `num_source_rows=100000`,
+#   `num_target_rows_updated=50000` (id 50 000–99 999 đã có → update thành `vip/platinum`) và
+#   `num_target_rows_inserted=50000` (id 100 000–149 999 chưa có → insert). Kết quả 150 000 dòng.
+#   MERGE ghi lại file bị ảnh hưởng (1 file removed, 1 file added) trong **một** commit, nên reader
+#   chỉ thấy trước-MERGE hoặc sau-MERGE, không bao giờ thấy nửa chừng.
+# * **Time travel:** `version=0` đọc lại đúng 100 000 dòng ban đầu; `version=1` cho schema có thêm
+#   `tier`; `version=3` thấy 50 dòng lỗi `score=-1`. Mỗi version là một snapshot bất biến được dựng
+#   lại từ log, không phải bản sao dữ liệu.
+# * **RESTORE:** `restore(2)` không xóa lịch sử mà ghi **commit mới v4 (RESTORE)** trỏ tập file hiện
+#   hành về đúng trạng thái v2 → số dòng `score < 0` ở version hiện tại = **0**. History có
+#   **5 version** (WRITE, WRITE, MERGE, WRITE, RESTORE), đạt ngưỡng ≥ 5 và có dòng RESTORE.
+# * **Hệ quả cần nhớ:** dữ liệu lỗi vẫn đọc được ở v3 cho tới khi VACUUM dọn các file đó — tốt cho
+#   audit/điều tra sự cố, nhưng nghĩa là "rollback" không đồng nghĩa "xóa vật lý" (xem NB6, NB8).
 
 # %% [markdown]
 # ## ✅ Deliverable check

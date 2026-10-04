@@ -412,6 +412,54 @@ print("it is driven by FILE COUNT, not data volume. Fixing your writer's")
 print("trigger interval is cheaper than paying someone to clean up after it.")
 
 # %% [markdown]
+# ### Đối chiếu số đếm — trong `_delta_log/` có gì?
+#
+# `count_files()` đếm đệ quy mọi `*.parquet`, kể cả checkpoint trong `_delta_log/`. Cell dưới tách
+# riêng data file và checkpoint để đọc đúng các con số "on disk" ở Job 4 và Job 5.
+
+# %%
+ckpts = sorted(p.name for p in log_dir.glob("*.checkpoint.parquet"))
+data_on_disk = [f for f in Path(TABLE).rglob("*.parquet") if "_delta_log" not in f.parts]
+print(f"checkpoint files in _delta_log: {ckpts}")
+print(f"_last_checkpoint → {(log_dir / '_last_checkpoint').read_text().strip()[:80]}")
+print(f"data parquet on disk: {len(data_on_disk)}   in log: {len(DeltaTable(TABLE).file_uris())}")
+
+# %% [markdown]
+# ### Giải thích kết quả NB6
+#
+# * **Baseline:** 200 commit × 500 dòng → 200 file, trung bình ~51.5 KB/file (mục tiêu production
+#   128–512 MB). Mỗi commit đều đúng; chính sự *tích lũy* là lỗi.
+# * **Job 1 – Compaction: 200 → 11 file (18×, ngưỡng ≥ 10×).** `optimize.compact()` là một commit
+#   mới: thêm 11 file, *tombstone* 200 file cũ. Dung lượng data tạm thời **tăng** 10.1 → 16.1 MB vì
+#   file cũ chưa bị xóa — phải trả tiền gấp đôi cho tới khi VACUUM.
+# * **Job 2 – Clustering: skip 90 % (ngưỡng ≥ 50 %).** Trước Z-order cả 11/11 file có dải
+#   `user_id` chồng lấn nên phải mở hết; sau Z-order chỉ 1/10 file có `min ≤ 12345 ≤ max`. Số này
+#   tính từ min/max trong log nên tất định, không phụ thuộc đồng hồ.
+# * **Job 3 – Expiry (VACUUM retention 0): thu hồi 16.1 MB**, data còn 6.2 MB, 100 000 dòng nguyên
+#   vẹn — nhưng time travel về các version cũ đã mất. Lưu ý đọc số: dòng "would reclaim 211 files
+#   (0 B)" in 0 B vì `vacuum(dry_run=True)` trả về **đường dẫn tương đối** (211 = 200 file gốc + 11 file
+#   compaction đã bị Z-order thay), còn `du()` lại resolve theo thư mục làm việc của notebook. Số đúng
+#   là 16.1 MB đo trực tiếp trước/sau. Dry-run lần hai vẫn báo 211 vì tombstone còn nằm trong log dù
+#   file vật lý đã bị xóa — nó **không** đếm orphan.
+# * **Job 4 – Orphans: tìm và xóa đúng 3 file** `part-9999{0,1,2}-crashed-writer…`. Phát hiện đo
+#   được: `deltalake` VACUUM chỉ xóa file đã bị tombstone trong log; file của writer crash chưa bao
+#   giờ được commit nên log không biết nó tồn tại, retention bao nhiêu cũng không dọn. Phải tự làm
+#   phép hiệu tập hợp *file trên đĩa − file log tham chiếu*, kèm age guard 24 h để không xóa file của
+#   writer đang chạy. Dòng "5 files you pay for" ở trên = 3 orphan + **2 checkpoint tự động**
+#   (v99, v199) mà `count_files()` đếm đệ quy trong `_delta_log/` — checkpoint không phải orphan,
+#   nên `find_orphans()` loại `_delta_log` ra và chỉ tìm thấy 3.
+# * **Job 5 – Checkpoint:** delta-rs đã tự viết checkpoint ở v99 và v199; `create_checkpoint()`
+#   viết thêm checkpoint ở version hiện hành và cập nhật `_last_checkpoint` (cell đối chiếu ở trên).
+#   Dòng "Checkpoint written: …099…" chỉ in phần tử đầu tiên của glob, không phải file vừa tạo.
+#   Reader cold-start giờ đọc 1 checkpoint + vài JSON sau nó thay vì replay 204 JSON.
+# * **Iceberg:** `expire_snapshots` giảm **20 → 3 snapshot** nhưng **0 file avro bị xóa**, metadata
+#   còn tăng 344.3 → ~352 KB (thêm 1 metadata.json). Đây là hành vi của PyIceberg 0.12 trong lab:
+#   expiry chỉ làm file *không còn được tham chiếu*. Quét 17 manifest list mồ côi (37.1 KB) mới thực
+#   sự thu hồi bytes; 2 000 dòng vẫn đọc đủ. Job 3 và Job 4 phải chạy thành cặp.
+# * **Chi phí:** managed compaction bảng 500 GB / 2 triệu file tốn ~$990/tháng, trong đó 24 % do *số
+#   file* chứ không do dung lượng — sửa trigger interval của writer rẻ hơn trả tiền dọn dẹp.
+
+# %% [markdown]
 # ## ✅ NB6 pass criteria
 #
 # | Check | Target |

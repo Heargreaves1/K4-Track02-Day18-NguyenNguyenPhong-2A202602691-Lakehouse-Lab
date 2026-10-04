@@ -157,6 +157,27 @@ print(
 )
 
 # %% [markdown]
+# ### Giải thích kết quả NB2
+#
+# * **Small-file problem tái hiện được:** 200 lần append × 5K dòng → **200 file** trước OPTIMIZE
+#   (đạt ngưỡng ≥ 100). Mỗi file chứa `user_id` ngẫu nhiên trong [1, 100 000], nên min/max của
+#   *mọi* file gần như phủ toàn dải → stats không loại được file nào, point query phải mở cả 200 file.
+# * **Sau `compact()` + `z_order(["user_id"])`:** còn **55 file** (giảm ~4×). Mức giảm vừa phải là có
+#   chủ ý: `target_size=256 KB` giữ lại nhiều file để Z-order có cái mà prune; nếu gộp hết thành
+#   1 file thì không còn gì để skip.
+# * **Files-pruned ratio = 55×** (ngưỡng ≥ 10×): sau Z-order, các dải `user_id` của 55 file gần như
+#   không chồng lấn (~1 850 user/file), chỉ **1/55 file** ([3696, 5534]) có thể chứa `user_id=4242`.
+#   Delta đọc min/max từ action `add` trong log và bỏ qua 54 file còn lại mà không cần mở chúng.
+#   Đây là chỉ số tất định (không phụ thuộc máy) nên mình dùng nó làm tiêu chí chính.
+# * **Speedup wall-clock** (in ở output phía trên) cũng ≥ 3× ở lần chạy được lưu; qua các lần chạy thử
+#   trên máy mình nó dao động khoảng 5.8–6.5×. Con số này phụ thuộc cache hệ điều hành, SSD và tải
+#   CPU, nên rubric chấp nhận *một trong hai* ngưỡng và pruning là thước đo đáng tin hơn. Lưu ý thêm: biên
+#   các file liền kề có thể trùng nhau (ví dụ `[1, 1851]` và `[1851, 3696]`), nên truy vấn đúng giá
+#   trị biên sẽ phải mở 2 file — Z-order thu hẹp dải chứ không đảm bảo tách rời tuyệt đối.
+# * Ý nghĩa thực tế: trên object storage, mỗi file bị bỏ qua là bớt một request `GET` + footer
+#   Parquet; ở quy mô 10K truy vấn/ngày, đọc 1 thay vì 200 file là chênh lệch ~2 triệu request/ngày.
+
+# %% [markdown]
 # ## ✅ Deliverable check
 # - [ ] Speedup ≥ 3× **or** files-pruned ratio ≥ 10× (slide §6 allows either)
 # - [ ] File count dropped substantially after compact()
