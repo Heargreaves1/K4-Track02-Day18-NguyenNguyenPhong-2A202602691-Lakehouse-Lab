@@ -9,7 +9,8 @@
 - Chuyển 8 notebook sang `.ipynb` và thực thi trong Jupyter kernel để giữ output.
 - Thêm các cell bằng chứng (NB1 `_delta_log/` + cờ schema enforcement thật, NB3 số dòng theo version,
   NB4 kiểm tra chất lượng Gold, NB6 đối chiếu checkpoint) — chi tiết trong [INFO.md](INFO.md).
-- Viết nháp các mục "Giải thích kết quả" trong notebook, `INFO.md` và `REFLECTION.md`.
+- Viết các mục "Giải thích kết quả" trong notebook và `INFO.md`.
+- Viết `REFLECTION.md`; người nộp dùng nguyên văn bản AI viết, không chỉnh sửa thêm.
 - Tạo screenshot bằng cách render các cell đã chạy (nbconvert) và chụp bằng Edge headless.
 - Bonus: viết nháp `bonus/ARCHITECTURE.md` (chọn topic, quyết định, failure modes, phép tính chi phí)
   và viết + chạy PoC `bonus/poc/poc_pii_retention.py`; số liệu PoC trong tài liệu lấy từ lần chạy thật.
